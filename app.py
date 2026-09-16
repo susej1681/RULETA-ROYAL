@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 from collections import Counter
+from datetime import datetime
 
 # ============================================================
 # CONFIGURACIÓN
@@ -17,7 +18,7 @@ GOOGLE_SHEET_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/ex
 
 SORTEOS_POR_DIA = 13
 DIAS_VENTANA = 5
-VENTANA_SORTEOS = SORTEOS_POR_DIA * DIAS_VENTANA  # 65 sorteos
+VENTANA_SORTEOS = SORTEOS_POR_DIA * DIAS_VENTANA
 
 ANIMALITOS_DICT = {
     0: "Tiburón", 1: "Carnero", 2: "Toro", 3: "Ciempiés", 4: "Alacrán",
@@ -42,266 +43,270 @@ TABLA_JALES_BASE = {
 }
 
 # ============================================================
-# CARGA AUTOMÁTICA DESDE GOOGLE SHEETS
+# CARGA DE DATOS
 # ============================================================
 @st.cache_data(ttl=120)
 def cargar_historial_google_sheets():
     try:
-        df_raw = pd.read_csv(GOOGLE_SHEET_URL)
-        date_cols = [col for col in df_raw.columns if '/' in str(col)]
-        hora_col = df_raw.columns[0]
+        df_raw = pd.read_csv(GOOGLE_SHEET_URL, header=None)
 
         registros = []
-        for _, row in df_raw.iterrows():
-            sorteo_hora = str(row[hora_col]).strip()
-            if not sorteo_hora or 'Hora' in sorteo_hora or sorteo_hora.lower() == 'nan':
-                continue
+        fechas_encontradas = []
+        for col in df_raw.columns:
+            for fila in range(len(df_raw)):
+                val = str(df_raw.iloc[fila, col]).strip()
+                if re.match(r'^\d{2}/\d{2}/\d{4}$', val):
+                    fechas_encontradas.append((col, fila, val))
 
-            for fecha in date_cols:
-                val = row[fecha]
-                if pd.isna(val) or str(val).strip() == "" or str(val).startswith("-"):
+        fechas_unicas = {}
+        for col, fila, fecha in fechas_encontradas:
+            key = (col, fecha)
+            if key not in fechas_unicas:
+                fechas_unicas[key] = fila
+
+        fecha_cols = {}
+        for (col, fecha), fila_enc in fechas_unicas.items():
+            if col not in fecha_cols:
+                fecha_cols[col] = {"fecha": fecha, "fila": fila_enc}
+
+        cols_ordenadas = sorted(fecha_cols.keys())
+
+        for col in cols_ordenadas:
+            info = fecha_cols[col]
+            fecha = info["fecha"]
+            fila_ini = info["fila"] + 1
+            for fila in range(fila_ini, len(df_raw)):
+                val = str(df_raw.iloc[fila, col]).strip()
+                if not val or val.lower() == "nan":
                     continue
-
-                match = re.search(r'\((\d+)\)', str(val))
+                match = re.search(r'\((\d+)\)', val)
                 if match:
                     num = int(match.group(1))
-                    nombre = ANIMALITOS_DICT.get(num, re.sub(r'\s*\(\d+\)', '', str(val)).strip())
+                    nombre = ANIMALITOS_DICT.get(num, re.sub(r'\s*\(\d+\)', '', val).strip())
                     registros.append({
-                        "fecha": str(fecha).strip(),
-                        "sorteo": sorteo_hora,
+                        "fecha": fecha,
                         "numero": num,
                         "nombre": nombre
                     })
 
         df = pd.DataFrame(registros)
         if not df.empty:
-            df = df.reset_index(drop=True)
+            df["fecha_dt"] = pd.to_datetime(df["fecha"], format="%d/%m/%Y", errors="coerce")
+            df = df.sort_values(["fecha_dt"]).reset_index(drop=True)
         return df
 
     except Exception as e:
-        st.error(f"Error al conectar con Google Sheets: {e}")
-        return pd.DataFrame(columns=["fecha", "sorteo", "numero", "nombre"])
+        st.error(f"Error al leer Google Sheet: {e}")
+        return pd.DataFrame(columns=["fecha", "numero", "nombre"])
 
 
 # ============================================================
-# MOTOR CASI ADIVINO — DINÁMICO CON RESCATE
+# MOTOR CASI ADIVINO
 # ============================================================
 def motor_casi_adivino(df):
     if df.empty or len(df) < 20:
-        return [], {}, None
+        return {}, {}, None, []
 
-    # Ventana corrediza de 65 sorteos (5 días × 13)
     df_ventana = df.tail(VENTANA_SORTEOS).copy()
-
-    # Frecuencias en distintas ventanas
     freq_ventana = Counter(df_ventana["numero"].tolist())
     freq_rec20 = Counter(df.tail(20)["numero"].tolist())
     freq_rec30 = Counter(df.tail(30)["numero"].tolist())
 
-    # Atraso real = sorteos desde la última aparición
     atrasos = {}
     total = len(df)
     for num in ANIMALITOS_DICT.keys():
         idxs = df[df["numero"] == num].index.tolist()
-        if idxs:
-            atrasos[num] = total - 1 - idxs[-1]
-        else:
-            atrasos[num] = total
+        atrasos[num] = total - 1 - idxs[-1] if idxs else total
 
-    # Jales aprendidos del historial real
     jales_aprendidos = {n: Counter() for n in ANIMALITOS_DICT.keys()}
     nums_lista = df["numero"].tolist()
     for i in range(len(nums_lista) - 1):
-        actual = nums_lista[i]
-        siguiente = nums_lista[i + 1]
-        if actual in jales_aprendidos:
-            jales_aprendidos[actual][siguiente] += 1
+        jales_aprendidos[nums_lista[i]][nums_lista[i + 1]] += 1
 
-    # Jales entrantes: cuántos números recientes lo jalan
     ultimos_10 = df.tail(10)["numero"].tolist()
     jales_entrantes = Counter()
-    for num_reciente in ultimos_10:
-        for posible_jale in TABLA_JALES_BASE.get(num_reciente, []):
-            jales_entrantes[posible_jale] += 1
+    for nr in ultimos_10:
+        for pj in TABLA_JALES_BASE.get(nr, []):
+            jales_entrantes[pj] += 1
 
-    # Normalizadores
-    max_freq_v = max(freq_ventana.values()) if freq_ventana else 1
-    max_freq_20 = max(freq_rec20.values()) if freq_rec20 else 1
-    max_atraso = max(atrasos.values()) if atrasos else 1
-    max_jales = max(jales_entrantes.values()) if jales_entrantes else 1
+    max_fv = max(freq_ventana.values()) if freq_ventana else 1
+    max_f20 = max(freq_rec20.values()) if freq_rec20 else 1
+    max_atr = max(atrasos.values()) if atrasos else 1
+    max_jal = max(jales_entrantes.values()) if jales_entrantes else 1
+
+    hoy = df["fecha"].iloc[-1]
+    ayer_nums = set(df[df["fecha"] == df["fecha"].iloc[-2]]["numero"].tolist()) if len(df["fecha"].unique()) > 1 else set()
 
     scores = {}
     detalles = {}
 
     for num in ANIMALITOS_DICT.keys():
-        f_v = freq_ventana.get(num, 0)
-        f_20 = freq_rec20.get(num, 0)
-        f_30 = freq_rec30.get(num, 0)
+        fv = freq_ventana.get(num, 0)
+        f20 = freq_rec20.get(num, 0)
+        f30 = freq_rec30.get(num, 0)
         atr = atrasos.get(num, 0)
-        jales_in = jales_entrantes.get(num, 0)
+        jal = jales_entrantes.get(num, 0)
 
-        # Normalizar a escala 0-1
-        n_fv = f_v / max_freq_v if max_freq_v else 0
-        n_f20 = f_20 / max_freq_20 if max_freq_20 else 0
-        n_atr = atr / max_atraso if max_atraso else 0
-        n_jal = jales_in / max_jales if max_jales else 0
+        n_fv = fv / max_fv if max_fv else 0
+        n_f20 = f20 / max_f20 if max_f20 else 0
+        n_atr = atr / max_atr if max_atr else 0
+        n_jal = jal / max_jal if max_jal else 0
 
-        # Bonus caliente (salió 2+ veces en últimos 30)
-        bonus = 0.05 if f_30 >= 2 else 0
+        bonus_caliente = 0.08 if f30 >= 3 else (0.04 if f30 == 2 else 0)
+        penal_frio = 0
 
-        # Score ponderado
+        if atr > 60:
+            penal_frio = -0.35
+        elif atr > 45:
+            penal_frio = -0.20
+        elif atr > 30:
+            penal_frio = -0.10
+
         score = (
-            n_fv * 0.30 +      # Frecuencia en ventana 65
-            n_f20 * 0.25 +     # Frecuencia reciente (últimos 20)
-            n_atr * 0.25 +     # Atraso real
-            n_jal * 0.15 +     # Jales entrantes
-            bonus              # Bonus caliente
+            n_fv * 0.25 +
+            n_f20 * 0.25 +
+            n_atr * 0.20 +
+            n_jal * 0.15 +
+            bonus_caliente +
+            penal_frio
         )
 
-        # PENALIZACIÓN: sin frecuencia en ventana = castigo
-        if f_v == 0:
-            score *= 0.5
+        if fv == 0:
+            score *= 0.4
 
-        scores[num] = round(score * 100, 2)
+        scores[num] = round(max(score, 0) * 100, 2)
         detalles[num] = {
-            "freq_ventana": f_v,
-            "freq_20": f_20,
+            "freq_ventana": fv,
+            "freq_20": f20,
             "atraso": atr,
-            "jales_entrantes": jales_in,
-            "bonus_caliente": bonus > 0
+            "jales_in": jal,
+            "caliente": bonus_caliente > 0,
+            "repetidor": num in ayer_nums,
+            "penal": penal_frio < 0
         }
 
-    # RESCATE: fuera de ventana + atraso alto + jalado por recientes
-    nums_en_ventana = set(df_ventana["numero"].tolist())
-    rescatados = []
-    for num in ANIMALITOS_DICT.keys():
-        if num not in nums_en_ventana and atrasos[num] > 20:
-            if jales_entrantes.get(num, 0) >= 1:
-                scores[num] = max(scores.get(num, 0), 55.0)
-                rescatados.append(num)
+    top_ordenado = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return scores, detalles, top_ordenado, df
 
-    # Top 3
-    top_3 = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:3]
 
-    resultado = []
-    for num, score in top_3:
-        resultado.append({
+def armar_resultados(scores, detalles, top_ordenado):
+    top3 = []
+    for num, sc in top_ordenado[:3]:
+        top3.append({
             "numero": f"{num:02d}",
             "int_num": num,
             "nombre": ANIMALITOS_DICT[num],
-            "score": score,
-            "detalle": detalles[num],
-            "rescatado": num in rescatados
+            "score": sc,
+            "detalle": detalles[num]
         })
 
-    ultimo = df.iloc[-1].to_dict() if not df.empty else None
-    return resultado, jales_aprendidos, ultimo
+    individual = top3[0] if top3 else None
+
+    candidatos_tripleta = [num for num, sc in top_ordenado if sc > 0][:15]
+    tripleta_nums = candidatos_tripleta[:3]
+
+    tripleta = []
+    for num in tripleta_nums:
+        tripleta.append({
+            "numero": f"{num:02d}",
+            "int_num": num,
+            "nombre": ANIMALITOS_DICT[num],
+            "score": scores[num],
+            "detalle": detalles[num]
+        })
+
+    return individual, top3, tripleta
 
 
 # ============================================================
-# JALES COMBINADOS (BASE + APRENDIDOS)
-# ============================================================
-def calcular_jales(top_3, jales_aprendidos):
-    sugerencias = []
-    for item in top_3:
-        num = item["int_num"]
-        base = set(TABLA_JALES_BASE.get(num, []))
-        aprendidos = jales_aprendidos.get(num, Counter())
-        top_aprendidos = set([n for n, c in aprendidos.most_common(3) if c >= 2])
-        combinados = base | top_aprendidos
-        for j in sorted(combinados):
-            sugerencias.append({
-                "origen": f"[{item['numero']}] {item['nombre']}",
-                "jale_num": f"{j:02d}",
-                "jale_nombre": ANIMALITOS_DICT.get(j, ""),
-                "es_aprendido": j in top_aprendidos and j not in base
-            })
-    return sugerencias
-
-
-# ============================================================
-# INTERFAZ PRINCIPAL
+# INTERFAZ
 # ============================================================
 def main():
     st.title("👑 Ruleta Royal Pro")
-    st.caption("Motor Casi Adivino dinámico · Ventana 65 sorteos · Auto-sync Google Sheets")
+    st.caption("Casi Adivino · Ventana 65 sorteos · Tripleta 11 sorteos")
 
-    col_a, col_b = st.columns([3, 1])
-    with col_b:
-        if st.button("🔄 Recargar"):
-            st.cache_data.clear()
-            st.rerun()
+    if st.button("🔄 Recargar datos"):
+        st.cache_data.clear()
+        st.rerun()
 
-    with st.spinner("Sincronizando historial desde Google Sheets..."):
+    with st.spinner("Leyendo Google Sheet..."):
         df = cargar_historial_google_sheets()
 
     if df.empty:
-        st.error("No se pudieron cargar datos. Verifica que el Google Sheet sea público.")
+        st.error("No se pudieron cargar datos. Verifica que el Sheet sea público.")
         return
 
-    top3, jales_aprendidos, ultimo = motor_casi_adivino(df)
+    scores, detalles, top_ordenado, df = motor_casi_adivino(df)
+    if not top_ordenado:
+        st.warning("Datos insuficientes.")
+        return
 
-    tab1, tab2, tab3 = st.tabs(["🎯 Zona Dulce & Jales", "📊 Historial", "ℹ️ Info"])
+    individual, top3, tripleta = armar_resultados(scores, detalles, top_ordenado)
 
-    with tab1:
-        if ultimo:
-            st.markdown("### 🎯 Último Animal Royal")
-            st.markdown(f"## {ultimo['numero']:02d} - {ultimo['nombre']}")
-            st.info(f"Fecha: {ultimo['fecha']} · Hora: {ultimo['sorteo']}")
+    ultimo = df.iloc[-1]
 
-        st.markdown("---")
-        st.markdown("### 🔥 Top 3 - Zona Dulce")
+    # ÚLTIMO RESULTADO
+    st.markdown("### 🎯 Último resultado")
+    st.markdown(f"## {ultimo['numero']:02d} - {ultimo['nombre']}")
+    st.caption(f"Fecha: {ultimo['fecha']}")
 
-        for i, item in enumerate(top3, 1):
-            d = item["detalle"]
-            marca_rescate = " 🚨 RESCATADO" if item["rescatado"] else ""
-            st.markdown(f"#### #{i} - {item['numero']} {item['nombre']}{marca_rescate}")
-            st.markdown(f"**Puntuación: {item['score']}%**")
-            st.markdown(
-                f"Freq(65): {d['freq_ventana']} | "
-                f"Freq(20): {d['freq_20']} | "
-                f"Atraso: {d['atraso']} | "
-                f"Jales in: {d['jales_entrantes']}"
-                + (" | 🔥 Caliente" if d["bonus_caliente"] else "")
-            )
-            st.markdown("")
+    st.markdown("---")
 
-        if len(top3) >= 3:
-            st.markdown("---")
-            st.markdown("### ✨ Tripleta Ideal")
-            tripleta = " - ".join([f"{i['numero']} {i['nombre']}" for i in top3])
-            st.success(tripleta)
+    # ANIMAL INDIVIDUAL
+    if individual:
+        st.markdown("### 🎯 Animal Individual (el más fuerte)")
+        d = individual["detalle"]
+        st.markdown(f"## {individual['numero']} - {individual['nombre']}")
+        st.markdown(f"**Score: {individual['score']}%**")
+        marcas = []
+        if d["caliente"]: marcas.append("🔥 Caliente")
+        if d["repetidor"]: marcas.append("🔁 Repetidor de ayer")
+        if d["penal"]: marcas.append("⚠️ Enjaulado")
+        if marcas:
+            st.markdown(" · ".join(marcas))
+        st.caption(f"Freq(65): {d['freq_ventana']} | Freq(20): {d['freq_20']} | Atraso: {d['atraso']} | Jales: {d['jales_in']}")
 
-        st.markdown("---")
-        st.markdown("### 🔗 Jales Recomendados")
-        jales = calcular_jales(top3, jales_aprendidos)
-        for j in jales:
-            marca = " ⭐ (aprendido)" if j["es_aprendido"] else ""
-            st.write(f"- **{j['origen']}** → **[{j['jale_num']}] {j['jale_nombre']}**{marca}")
+    st.markdown("---")
 
-    with tab2:
-        st.subheader("📋 Historial Sincronizado")
-        st.write(f"Total de sorteos cargados: {len(df)}")
-        st.dataframe(df.tail(100), use_container_width=True)
+    # TOP 3
+    st.markdown("### 🏆 Top 3")
+    for i, item in enumerate(top3, 1):
+        d = item["detalle"]
+        marcas = []
+        if d["caliente"]: marcas.append("🔥")
+        if d["repetidor"]: marcas.append("🔁")
+        if d["penal"]: marcas.append("⚠️")
+        st.markdown(f"**#{i} - {item['numero']} {item['nombre']}** — {item['score']}% {' '.join(marcas)}")
+        st.caption(f"Freq(65): {d['freq_ventana']} | Freq(20): {d['freq_20']} | Atraso: {d['atraso']} | Jales: {d['jales_in']}")
 
-    with tab3:
-        st.subheader("ℹ️ Cómo funciona el motor")
-        st.markdown("""
-        **Ventana dinámica:** analiza los últimos 65 sorteos (5 días × 13 sorteos).
-        
-        **Score explicable, 5 componentes:**
-        - Frecuencia en ventana 65 (peso 30%)
-        - Frecuencia reciente últimos 20 (peso 25%)
-        - Atraso real (peso 25%)
-        - Jales entrantes de recientes (peso 15%)
-        - Bonus caliente si salió 2+ en últimos 30 (5%)
-        
-        **Penalización:** si un animalito no ha salido en la ventana, su score se divide a la mitad.
-        
-        **Rescate:** si un animalito fuera de la ventana tiene atraso > 20 y es jalado por algún reciente, entra con boost de 55%.
-        
-        **Jales:** se combinan la tabla base + los aprendidos del historial real.
-        """)
+    st.markdown("---")
+
+    # TRIPLETA
+    st.markdown("### ✨ Tripleta (cubre 11 sorteos)")
+    if len(tripleta) >= 3:
+        linea = " - ".join([f"{t['numero']} {t['nombre']}" for t in tripleta])
+        st.success(linea)
+        st.caption("Juega estos 3. Si los 3 salen en los próximos 11 sorteos, ganaste.")
+        for t in tripleta:
+            d = t["detalle"]
+            marcas = []
+            if d["caliente"]: marcas.append("🔥")
+            if d["repetidor"]: marcas.append("🔁 Repetidor de ayer")
+            st.write(f"- **{t['numero']} {t['nombre']}** ({t['score']}%) {' '.join(marcas)}")
+
+    st.markdown("---")
+
+    # OBSERVACIÓN REPETIDORES
+    st.markdown("### 🔁 Observación: Repetidores de ayer")
+    repetidores_hoy = [n for n in detalles if detalles[n]["repetidor"]]
+    if repetidores_hoy:
+        for num in repetidores_hoy[:10]:
+            st.write(f"- {num:02d} - {ANIMALITOS_DICT[num]}")
+    else:
+        st.caption("Ninguno todavía.")
+
+    with st.expander("📋 Ver últimos 30 sorteos"):
+        st.dataframe(df.tail(30)[["fecha", "numero", "nombre"]], use_container_width=True)
 
 
 if __name__ == "__main__":
