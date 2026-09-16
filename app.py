@@ -27,23 +27,11 @@ ANIMALITOS_DICT = {
     35: "Pantera", 36: "Culebra"
 }
 
-TABLA_JALES_BASE = {
-    0: [10, 16, 28], 1: [2, 12], 2: [1, 22], 3: [14, 25], 4: [9, 15],
-    5: [11, 21], 6: [8, 17], 7: [27, 32], 8: [6, 18], 9: [4, 29],
-    10: [0, 16], 11: [5, 19], 12: [1, 26], 13: [20, 28], 14: [3, 21],
-    15: [4, 34], 16: [0, 27], 17: [6, 30], 18: [8, 13], 19: [11, 28],
-    20: [13, 32], 21: [5, 14], 22: [2, 23], 23: [22, 36], 24: [31, 34],
-    25: [3, 12], 26: [12, 29], 27: [7, 16], 28: [0, 19], 29: [9, 26],
-    30: [17, 33], 31: [24, 35], 32: [7, 20], 33: [30, 36], 34: [15, 24],
-    35: [0, 5, 36], 36: [23, 33]
-}
-
 @st.cache_data(ttl=120)
 def cargar_historial_google_sheets():
     try:
         df_raw = pd.read_csv(GOOGLE_SHEET_URL, header=None)
 
-        # Encontrar todas las fechas válidas en cualquier celda
         fechas_encontradas = []
         for col in df_raw.columns:
             for fila in range(len(df_raw)):
@@ -64,7 +52,6 @@ def cargar_historial_google_sheets():
         if not fechas_encontradas:
             return pd.DataFrame(columns=["fecha", "numero", "nombre"])
 
-        # Agrupar por columna: nos quedamos con la fecha MÁS RECIENTE de cada columna
         cols_con_fecha = {}
         for f in fechas_encontradas:
             col = f["col"]
@@ -74,7 +61,6 @@ def cargar_historial_google_sheets():
                 if f["fecha_dt"] > cols_con_fecha[col]["fecha_dt"]:
                     cols_con_fecha[col] = f
 
-        # Ordenar columnas por fecha real
         cols_ordenadas = sorted(cols_con_fecha.items(), key=lambda x: x[1]["fecha_dt"])
 
         registros = []
@@ -106,9 +92,58 @@ def cargar_historial_google_sheets():
         return pd.DataFrame(columns=["fecha", "numero", "nombre"])
 
 
+def aprender_jales(df, max_atraso=3):
+    jales = {n: Counter() for n in ANIMALITOS_DICT.keys()}
+    nums = df["numero"].tolist()
+    for i in range(len(nums) - 1):
+        origen = nums[i]
+        for j in range(i + 1, min(i + 1 + max_atraso, len(nums))):
+            jales[origen][nums[j]] += 1
+    return jales
+
+
+def detectar_alineaciones(df, min_repeticiones=2):
+    nums = df["numero"].tolist()
+    total = len(nums)
+    alineaciones = []
+
+    for i in range(total - 10):
+        ventana = nums[i:i + 5]
+        unicos = list(dict.fromkeys(ventana))
+        for a in range(len(unicos)):
+            for b in range(a + 1, len(unicos)):
+                par = tuple(sorted([unicos[a], unicos[b]]))
+                alineaciones.append(par)
+
+    conteo_parejas = Counter(alineaciones)
+    parejas_top = [p for p, c in conteo_parejas.most_common(5) if c >= min_repeticiones]
+
+    resultado = []
+    for par in parejas_top:
+        posiciones = []
+        for i in range(total - 5):
+            ventana = set(nums[i:i + 5])
+            if par[0] in ventana and par[1] in ventana:
+                posiciones.append(i)
+        if len(posiciones) >= 2:
+            ultima = posiciones[-1]
+            atraso = total - 1 - ultima
+            diffs = [posiciones[k + 1] - posiciones[k] for k in range(len(posiciones) - 1)]
+            promedio = sum(diffs) / len(diffs) if diffs else 0
+            if promedio > 0 and atraso >= promedio * 0.6:
+                resultado.append({
+                    "par": par,
+                    "veces": len(posiciones),
+                    "atraso": atraso,
+                    "promedio": round(promedio, 1)
+                })
+
+    return resultado
+
+
 def motor_casi_adivino(df):
     if df.empty or len(df) < 20:
-        return {}, {}, None, []
+        return {}, {}, None, [], []
 
     df_ventana = df.tail(VENTANA_SORTEOS).copy()
     freq_ventana = Counter(df_ventana["numero"].tolist())
@@ -121,23 +156,19 @@ def motor_casi_adivino(df):
         idxs = df[df["numero"] == num].index.tolist()
         atrasos[num] = total - 1 - idxs[-1] if idxs else total
 
-    jales_aprendidos = {n: Counter() for n in ANIMALITOS_DICT.keys()}
-    nums_lista = df["numero"].tolist()
-    for i in range(len(nums_lista) - 1):
-        jales_aprendidos[nums_lista[i]][nums_lista[i + 1]] += 1
+    jales_aprendidos = aprender_jales(df, max_atraso=3)
 
     ultimos_10 = df.tail(10)["numero"].tolist()
     jales_entrantes = Counter()
     for nr in ultimos_10:
-        for pj in TABLA_JALES_BASE.get(nr, []):
-            jales_entrantes[pj] += 1
+        for siguiente, c in jales_aprendidos.get(nr, Counter()).most_common(3):
+            jales_entrantes[siguiente] += c
 
     max_fv = max(freq_ventana.values()) if freq_ventana else 1
     max_f20 = max(freq_rec20.values()) if freq_rec20 else 1
     max_atr = max(atrasos.values()) if atrasos else 1
     max_jal = max(jales_entrantes.values()) if jales_entrantes else 1
 
-    # Detectar repetidores: animales que salieron ayer y hoy
     fechas_unicas = df["fecha"].unique().tolist()
     ayer_nums = set()
     if len(fechas_unicas) >= 2:
@@ -192,7 +223,9 @@ def motor_casi_adivino(df):
         }
 
     top_ordenado = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    return scores, detalles, top_ordenado, df
+    alineaciones = detectar_alineaciones(df, min_repeticiones=2)
+
+    return scores, detalles, top_ordenado, jales_aprendidos, alineaciones
 
 
 def armar_resultados(scores, detalles, top_ordenado):
@@ -207,7 +240,6 @@ def armar_resultados(scores, detalles, top_ordenado):
         })
 
     individual = top3[0] if top3 else None
-
     candidatos_tripleta = [num for num, sc in top_ordenado if sc > 0][:15]
     tripleta_nums = candidatos_tripleta[:3]
 
@@ -226,7 +258,7 @@ def armar_resultados(scores, detalles, top_ordenado):
 
 def main():
     st.title("👑 Ruleta Royal Pro")
-    st.caption("Casi Adivino · Ventana 65 sorteos · Tripleta 11 sorteos")
+    st.caption("Casi Adivino · Ventana 65 sorteos · Tripleta 11 sorteos · Jales aprendidos")
 
     if st.button("🔄 Recargar datos"):
         st.cache_data.clear()
@@ -239,13 +271,21 @@ def main():
         st.error("No se pudieron cargar datos. Verifica que la hoja sea pública.")
         return
 
-    scores, detalles, top_ordenado, df = motor_casi_adivino(df)
+    scores, detalles, top_ordenado, jales_aprendidos, alineaciones = motor_casi_adivino(df)
     if not top_ordenado:
         st.warning("Datos insuficientes.")
         return
 
     individual, top3, tripleta = armar_resultados(scores, detalles, top_ordenado)
     ultimo = df.iloc[-1]
+
+    if alineaciones:
+        st.markdown("### 🔗 Alineación Caliente Detectada")
+        for al in alineaciones[:3]:
+            a, b = al["par"]
+            st.markdown(f"**{a:02d} {ANIMALITOS_DICT[a]} + {b:02d} {ANIMALITOS_DICT[b]}**")
+            st.caption(f"Se han alineado {al['veces']} veces · Promedio cada {al['promedio']} sorteos · Atraso: {al['atraso']}")
+        st.markdown("---")
 
     st.markdown("### 🎯 Último resultado")
     st.markdown(f"## {ultimo['numero']:02d} - {ultimo['nombre']}")
@@ -291,6 +331,17 @@ def main():
             if d["caliente"]: marcas.append("🔥")
             if d["repetidor"]: marcas.append("🔁 Repetidor de ayer")
             st.write(f"- **{t['numero']} {t['nombre']}** ({t['score']}%) {' '.join(marcas)}")
+
+    st.markdown("---")
+
+    st.markdown("### 🔗 Jales Aprendidos (Top 3 del último resultado)")
+    ultimo_num = int(ultimo["numero"])
+    jales_ult = jales_aprendidos.get(ultimo_num, Counter())
+    if jales_ult:
+        for jale, c in jales_ult.most_common(3):
+            st.write(f"- Después de **{ultimo['numero']} {ultimo['nombre']}** → **{jale:02d} {ANIMALITOS_DICT[jale]}** ({c} veces)")
+    else:
+        st.caption("Sin datos suficientes.")
 
     st.markdown("---")
 
