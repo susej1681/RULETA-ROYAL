@@ -2,11 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 from collections import Counter
-from datetime import datetime
 
-# ============================================================
-# CONFIGURACIÓN
-# ============================================================
 st.set_page_config(
     page_title="Ruleta Royal - Casi Adivino",
     page_icon="👑",
@@ -42,38 +38,48 @@ TABLA_JALES_BASE = {
     35: [0, 5, 36], 36: [23, 33]
 }
 
-# ============================================================
-# CARGA DE DATOS
-# ============================================================
 @st.cache_data(ttl=120)
 def cargar_historial_google_sheets():
     try:
         df_raw = pd.read_csv(GOOGLE_SHEET_URL, header=None)
 
-        registros = []
+        # Encontrar todas las fechas válidas en cualquier celda
         fechas_encontradas = []
         for col in df_raw.columns:
             for fila in range(len(df_raw)):
                 val = str(df_raw.iloc[fila, col]).strip()
-                if re.match(r'^\d{2}/\d{2}/\d{4}$', val):
-                    fechas_encontradas.append((col, fila, val))
+                if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', val):
+                    try:
+                        fecha_dt = pd.to_datetime(val, format="%d/%m/%Y", errors="coerce")
+                        if pd.notna(fecha_dt):
+                            fechas_encontradas.append({
+                                "col": col,
+                                "fila": fila,
+                                "fecha_str": fecha_dt.strftime("%d/%m/%Y"),
+                                "fecha_dt": fecha_dt
+                            })
+                    except:
+                        pass
 
-        fechas_unicas = {}
-        for col, fila, fecha in fechas_encontradas:
-            key = (col, fecha)
-            if key not in fechas_unicas:
-                fechas_unicas[key] = fila
+        if not fechas_encontradas:
+            return pd.DataFrame(columns=["fecha", "numero", "nombre"])
 
-        fecha_cols = {}
-        for (col, fecha), fila_enc in fechas_unicas.items():
-            if col not in fecha_cols:
-                fecha_cols[col] = {"fecha": fecha, "fila": fila_enc}
+        # Agrupar por columna: nos quedamos con la fecha MÁS RECIENTE de cada columna
+        cols_con_fecha = {}
+        for f in fechas_encontradas:
+            col = f["col"]
+            if col not in cols_con_fecha:
+                cols_con_fecha[col] = f
+            else:
+                if f["fecha_dt"] > cols_con_fecha[col]["fecha_dt"]:
+                    cols_con_fecha[col] = f
 
-        cols_ordenadas = sorted(fecha_cols.keys())
+        # Ordenar columnas por fecha real
+        cols_ordenadas = sorted(cols_con_fecha.items(), key=lambda x: x[1]["fecha_dt"])
 
-        for col in cols_ordenadas:
-            info = fecha_cols[col]
-            fecha = info["fecha"]
+        registros = []
+        for col, info in cols_ordenadas:
+            fecha = info["fecha_str"]
             fila_ini = info["fila"] + 1
             for fila in range(fila_ini, len(df_raw)):
                 val = str(df_raw.iloc[fila, col]).strip()
@@ -100,9 +106,6 @@ def cargar_historial_google_sheets():
         return pd.DataFrame(columns=["fecha", "numero", "nombre"])
 
 
-# ============================================================
-# MOTOR CASI ADIVINO
-# ============================================================
 def motor_casi_adivino(df):
     if df.empty or len(df) < 20:
         return {}, {}, None, []
@@ -134,8 +137,12 @@ def motor_casi_adivino(df):
     max_atr = max(atrasos.values()) if atrasos else 1
     max_jal = max(jales_entrantes.values()) if jales_entrantes else 1
 
-    hoy = df["fecha"].iloc[-1]
-    ayer_nums = set(df[df["fecha"] == df["fecha"].iloc[-2]]["numero"].tolist()) if len(df["fecha"].unique()) > 1 else set()
+    # Detectar repetidores: animales que salieron ayer y hoy
+    fechas_unicas = df["fecha"].unique().tolist()
+    ayer_nums = set()
+    if len(fechas_unicas) >= 2:
+        fecha_ayer = fechas_unicas[-2]
+        ayer_nums = set(df[df["fecha"] == fecha_ayer]["numero"].tolist())
 
     scores = {}
     detalles = {}
@@ -154,7 +161,6 @@ def motor_casi_adivino(df):
 
         bonus_caliente = 0.08 if f30 >= 3 else (0.04 if f30 == 2 else 0)
         penal_frio = 0
-
         if atr > 60:
             penal_frio = -0.35
         elif atr > 45:
@@ -218,9 +224,6 @@ def armar_resultados(scores, detalles, top_ordenado):
     return individual, top3, tripleta
 
 
-# ============================================================
-# INTERFAZ
-# ============================================================
 def main():
     st.title("👑 Ruleta Royal Pro")
     st.caption("Casi Adivino · Ventana 65 sorteos · Tripleta 11 sorteos")
@@ -229,11 +232,11 @@ def main():
         st.cache_data.clear()
         st.rerun()
 
-    with st.spinner("Leyendo Google Sheet..."):
+    with st.spinner("Leyendo hoja de cálculo..."):
         df = cargar_historial_google_sheets()
 
     if df.empty:
-        st.error("No se pudieron cargar datos. Verifica que el Sheet sea público.")
+        st.error("No se pudieron cargar datos. Verifica que la hoja sea pública.")
         return
 
     scores, detalles, top_ordenado, df = motor_casi_adivino(df)
@@ -242,17 +245,14 @@ def main():
         return
 
     individual, top3, tripleta = armar_resultados(scores, detalles, top_ordenado)
-
     ultimo = df.iloc[-1]
 
-    # ÚLTIMO RESULTADO
     st.markdown("### 🎯 Último resultado")
     st.markdown(f"## {ultimo['numero']:02d} - {ultimo['nombre']}")
     st.caption(f"Fecha: {ultimo['fecha']}")
 
     st.markdown("---")
 
-    # ANIMAL INDIVIDUAL
     if individual:
         st.markdown("### 🎯 Animal Individual (el más fuerte)")
         d = individual["detalle"]
@@ -268,7 +268,6 @@ def main():
 
     st.markdown("---")
 
-    # TOP 3
     st.markdown("### 🏆 Top 3")
     for i, item in enumerate(top3, 1):
         d = item["detalle"]
@@ -281,7 +280,6 @@ def main():
 
     st.markdown("---")
 
-    # TRIPLETA
     st.markdown("### ✨ Tripleta (cubre 11 sorteos)")
     if len(tripleta) >= 3:
         linea = " - ".join([f"{t['numero']} {t['nombre']}" for t in tripleta])
@@ -296,7 +294,6 @@ def main():
 
     st.markdown("---")
 
-    # OBSERVACIÓN REPETIDORES
     st.markdown("### 🔁 Observación: Repetidores de ayer")
     repetidores_hoy = [n for n in detalles if detalles[n]["repetidor"]]
     if repetidores_hoy:
