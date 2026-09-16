@@ -213,7 +213,6 @@ def motor_casi_adivino(df):
         elif atr > 30:
             penal_frio = -0.10
 
-        # ESCALA ESCALONADA
         penal_reciente = 0
         if atr_hoy == 0:
             penal_reciente = -0.60
