@@ -156,6 +156,20 @@ def motor_casi_adivino(df):
         idxs = df[df["numero"] == num].index.tolist()
         atrasos[num] = total - 1 - idxs[-1] if idxs else total
 
+    # ATRASO SOLO DENTRO DEL DÍA ACTUAL
+    fecha_hoy = df["fecha"].iloc[-1]
+    df_hoy = df[df["fecha"] == fecha_hoy]
+    total_hoy = len(df_hoy)
+    atraso_hoy = {}
+    for num in ANIMALITOS_DICT.keys():
+        idxs_hoy = df_hoy[df_hoy["numero"] == num].index.tolist()
+        if idxs_hoy:
+            # índice relativo dentro del día
+            pos = df_hoy.index.get_loc(idxs_hoy[-1])
+            atraso_hoy[num] = total_hoy - 1 - pos
+        else:
+            atraso_hoy[num] = 999  # no salió hoy
+
     jales_aprendidos = aprender_jales(df, max_atraso=3)
 
     ultimos_10 = df.tail(10)["numero"].tolist()
@@ -183,6 +197,7 @@ def motor_casi_adivino(df):
         f20 = freq_rec20.get(num, 0)
         f30 = freq_rec30.get(num, 0)
         atr = atrasos.get(num, 0)
+        atr_hoy = atraso_hoy.get(num, 999)
         jal = jales_entrantes.get(num, 0)
 
         n_fv = fv / max_fv if max_fv else 0
@@ -191,6 +206,7 @@ def motor_casi_adivino(df):
         n_jal = jal / max_jal if max_jal else 0
 
         bonus_caliente = 0.08 if f30 >= 3 else (0.04 if f30 == 2 else 0)
+
         penal_frio = 0
         if atr > 60:
             penal_frio = -0.35
@@ -199,13 +215,21 @@ def motor_casi_adivino(df):
         elif atr > 30:
             penal_frio = -0.10
 
+        # Penalización SOLO si salió hoy hace poco
+        penal_reciente = 0
+        if atr_hoy == 0:
+            penal_reciente = -0.40
+        elif atr_hoy == 1:
+            penal_reciente = -0.15
+
         score = (
             n_fv * 0.25 +
             n_f20 * 0.25 +
             n_atr * 0.20 +
             n_jal * 0.15 +
             bonus_caliente +
-            penal_frio
+            penal_frio +
+            penal_reciente
         )
 
         if fv == 0:
@@ -216,10 +240,12 @@ def motor_casi_adivino(df):
             "freq_ventana": fv,
             "freq_20": f20,
             "atraso": atr,
+            "atraso_hoy": atr_hoy,
             "jales_in": jal,
             "caliente": bonus_caliente > 0,
             "repetidor": num in ayer_nums,
-            "penal": penal_frio < 0
+            "penal": penal_frio < 0,
+            "reciente": penal_reciente < 0
         }
 
     top_ordenado = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -293,6 +319,17 @@ def main():
 
     st.markdown("---")
 
+    st.markdown("### 🔁 Repetidores de ayer")
+    repetidores_hoy = [n for n in detalles if detalles[n]["repetidor"]]
+    if repetidores_hoy:
+        for num in repetidores_hoy[:10]:
+            d = detalles[num]
+            st.write(f"- {num:02d} - {ANIMALITOS_DICT[num]} (atraso: {d['atraso']})")
+    else:
+        st.caption("Ninguno todavía.")
+
+    st.markdown("---")
+
     if individual:
         st.markdown("### 🎯 Animal Individual (el más fuerte)")
         d = individual["detalle"]
@@ -342,16 +379,6 @@ def main():
             st.write(f"- Después de **{ultimo['numero']} {ultimo['nombre']}** → **{jale:02d} {ANIMALITOS_DICT[jale]}** ({c} veces)")
     else:
         st.caption("Sin datos suficientes.")
-
-    st.markdown("---")
-
-    st.markdown("### 🔁 Observación: Repetidores de ayer")
-    repetidores_hoy = [n for n in detalles if detalles[n]["repetidor"]]
-    if repetidores_hoy:
-        for num in repetidores_hoy[:10]:
-            st.write(f"- {num:02d} - {ANIMALITOS_DICT[num]}")
-    else:
-        st.caption("Ninguno todavía.")
 
     with st.expander("📋 Ver últimos 30 sorteos"):
         st.dataframe(df.tail(30)[["fecha", "numero", "nombre"]], use_container_width=True)
