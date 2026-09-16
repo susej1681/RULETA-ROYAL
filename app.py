@@ -156,7 +156,6 @@ def motor_casi_adivino(df):
         idxs = df[df["numero"] == num].index.tolist()
         atrasos[num] = total - 1 - idxs[-1] if idxs else total
 
-    # ATRASO SOLO DENTRO DEL DÍA ACTUAL
     fecha_hoy = df["fecha"].iloc[-1]
     df_hoy = df[df["fecha"] == fecha_hoy]
     total_hoy = len(df_hoy)
@@ -164,11 +163,10 @@ def motor_casi_adivino(df):
     for num in ANIMALITOS_DICT.keys():
         idxs_hoy = df_hoy[df_hoy["numero"] == num].index.tolist()
         if idxs_hoy:
-            # índice relativo dentro del día
             pos = df_hoy.index.get_loc(idxs_hoy[-1])
             atraso_hoy[num] = total_hoy - 1 - pos
         else:
-            atraso_hoy[num] = 999  # no salió hoy
+            atraso_hoy[num] = 999
 
     jales_aprendidos = aprender_jales(df, max_atraso=3)
 
@@ -215,12 +213,18 @@ def motor_casi_adivino(df):
         elif atr > 30:
             penal_frio = -0.10
 
-        # Penalización SOLO si salió hoy hace poco
+        # ESCALA ESCALONADA
         penal_reciente = 0
         if atr_hoy == 0:
-            penal_reciente = -0.40
+            penal_reciente = -0.60
         elif atr_hoy == 1:
-            penal_reciente = -0.15
+            penal_reciente = -0.45
+        elif atr_hoy == 2:
+            penal_reciente = -0.30
+        elif atr_hoy == 3:
+            penal_reciente = -0.20
+        elif atr_hoy == 4:
+            penal_reciente = -0.10
 
         score = (
             n_fv * 0.25 +
