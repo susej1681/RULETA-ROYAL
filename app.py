@@ -84,7 +84,8 @@ def cargar_historial_google_sheets():
         df = pd.DataFrame(registros)
         if not df.empty:
             df["fecha_dt"] = pd.to_datetime(df["fecha"], format="%d/%m/%Y", errors="coerce")
-            df = df.sort_values(["fecha_dt"]).reset_index(drop=True)
+            # ORDEN ESTABLE: respeta el orden original de la hoja
+            df = df.sort_values(["fecha_dt"], kind="stable").reset_index(drop=True)
         return df
 
     except Exception as e:
@@ -143,7 +144,7 @@ def detectar_alineaciones(df, min_repeticiones=2):
 
 def motor_casi_adivino(df):
     if df.empty or len(df) < 20:
-        return {}, {}, None, [], []
+        return {}, {}, None, [], [], None
 
     df_ventana = df.tail(VENTANA_SORTEOS).copy()
     freq_ventana = Counter(df_ventana["numero"].tolist())
@@ -182,10 +183,17 @@ def motor_casi_adivino(df):
     max_jal = max(jales_entrantes.values()) if jales_entrantes else 1
 
     fechas_unicas = df["fecha"].unique().tolist()
-    ayer_nums = set()
-    if len(fechas_unicas) >= 2:
-        fecha_ayer = fechas_unicas[-2]
-        ayer_nums = set(df[df["fecha"] == fecha_ayer]["numero"].tolist())
+    ultima_fecha_str = fechas_unicas[-1]
+    ultima_fecha_dt = pd.to_datetime(ultima_fecha_str, format="%d/%m/%Y", errors="coerce")
+    hoy_real_dt = pd.Timestamp.now().normalize()
+
+    fecha_dia_anterior = None
+    if pd.notna(ultima_fecha_dt):
+        if ultima_fecha_dt.normalize() == hoy_real_dt:
+            if len(fechas_unicas) >= 2:
+                fecha_dia_anterior = fechas_unicas[-2]
+        else:
+            fecha_dia_anterior = ultima_fecha_str
 
     scores = {}
     detalles = {}
@@ -246,7 +254,6 @@ def motor_casi_adivino(df):
             "atraso_hoy": atr_hoy,
             "jales_in": jal,
             "caliente": bonus_caliente > 0,
-            "repetidor": num in ayer_nums,
             "penal": penal_frio < 0,
             "reciente": penal_reciente < 0
         }
@@ -254,7 +261,7 @@ def motor_casi_adivino(df):
     top_ordenado = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     alineaciones = detectar_alineaciones(df, min_repeticiones=2)
 
-    return scores, detalles, top_ordenado, jales_aprendidos, alineaciones
+    return scores, detalles, top_ordenado, jales_aprendidos, alineaciones, fecha_dia_anterior
 
 
 def armar_resultados(scores, detalles, top_ordenado):
@@ -300,7 +307,7 @@ def main():
         st.error("No se pudieron cargar datos. Verifica que la hoja sea pública.")
         return
 
-    scores, detalles, top_ordenado, jales_aprendidos, alineaciones = motor_casi_adivino(df)
+    scores, detalles, top_ordenado, jales_aprendidos, alineaciones, fecha_dia_anterior = motor_casi_adivino(df)
     if not top_ordenado:
         st.warning("Datos insuficientes.")
         return
@@ -322,14 +329,21 @@ def main():
 
     st.markdown("---")
 
-    st.markdown("### 🔁 Repetidores de ayer")
-    repetidores_hoy = [n for n in detalles if detalles[n]["repetidor"]]
-    if repetidores_hoy:
-        for num in repetidores_hoy[:10]:
-            d = detalles[num]
-            st.write(f"- {num:02d} - {ANIMALITOS_DICT[num]} (atraso: {d['atraso']})")
+    # SECCIÓN: ANIMALES DEL DÍA ANTERIOR EN ORDEN EXACTO
+    if fecha_dia_anterior:
+        st.markdown(f"### 🔁 Animales del {fecha_dia_anterior} (en orden de salida)")
+        df_dia = df[df["fecha"] == fecha_dia_anterior].reset_index(drop=True)
+        if not df_dia.empty:
+            for i, row in df_dia.iterrows():
+                num = int(row["numero"])
+                d = detalles.get(num, {})
+                atr_actual = d.get("atraso", "?")
+                st.write(f"{i+1}. **{num:02d} - {row['nombre']}** (atraso: {atr_actual})")
+        else:
+            st.caption("Sin datos de ese día.")
     else:
-        st.caption("Ninguno todavía.")
+        st.markdown("### 🔁 Animales del día anterior")
+        st.caption("No se detectó día anterior.")
 
     st.markdown("---")
 
@@ -340,7 +354,6 @@ def main():
         st.markdown(f"**Score: {individual['score']}%**")
         marcas = []
         if d["caliente"]: marcas.append("🔥 Caliente")
-        if d["repetidor"]: marcas.append("🔁 Repetidor de ayer")
         if d["penal"]: marcas.append("⚠️ Enjaulado")
         if marcas:
             st.markdown(" · ".join(marcas))
@@ -353,7 +366,6 @@ def main():
         d = item["detalle"]
         marcas = []
         if d["caliente"]: marcas.append("🔥")
-        if d["repetidor"]: marcas.append("🔁")
         if d["penal"]: marcas.append("⚠️")
         st.markdown(f"**#{i} - {item['numero']} {item['nombre']}** — {item['score']}% {' '.join(marcas)}")
         st.caption(f"Freq(65): {d['freq_ventana']} | Freq(20): {d['freq_20']} | Atraso: {d['atraso']} | Jales: {d['jales_in']}")
@@ -369,7 +381,6 @@ def main():
             d = t["detalle"]
             marcas = []
             if d["caliente"]: marcas.append("🔥")
-            if d["repetidor"]: marcas.append("🔁 Repetidor de ayer")
             st.write(f"- **{t['numero']} {t['nombre']}** ({t['score']}%) {' '.join(marcas)}")
 
     st.markdown("---")
