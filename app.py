@@ -76,8 +76,8 @@ def cargar_historial_google_sheets():
         return pd.DataFrame(columns=["fecha", "numero", "nombre"])
 
 
-def analizar_patrones(df, dias_analisis=5):
-    """Analiza los últimos 5 días y clasifica animalitos por patrón."""
+def analizar_patrones(df, dias_analisis=30):
+    """Analiza los últimos N días y clasifica animalitos por patrón."""
     if df.empty:
         return {}, [], [], [], [], []
 
@@ -131,7 +131,7 @@ def analizar_patrones(df, dias_analisis=5):
                     "gap_actual": gap_actual, "apariciones": len(apariciones)
                 })
 
-        # CADA 2 DÍAS: promedio 1.8-2.5, no salió hoy, ya pasó al menos 1 día
+        # CADA 2, 3, 4-5 DÍAS
         if not salio_hoy and gap_actual >= 1 and len(gaps) >= 2:
             if 1.8 <= promedio_gap <= 2.5:
                 cada_2_dias.append({
@@ -162,27 +162,21 @@ def armar_tripleta_patrones(repetidores, alternadores, cada_2, cada_3, cada_4_5)
     """Arma la tripleta con los 3 más fuertes de cada patrón."""
     candidatos = []
 
-    # Los repetidores más fuertes
     for r in repetidores[:3]:
         candidatos.append({"num": r["num"], "score": r["tasa"], "razon": f"🔁 Repite {r['tasa']}%"})
 
-    # Alternadores más fuertes
     for a in alternadores[:3]:
         candidatos.append({"num": a["num"], "score": a["tasa"], "razon": f"🔄 Alterna {a['tasa']}%"})
 
-    # Cada 2 días
     for c in cada_2[:3]:
         candidatos.append({"num": c["num"], "score": 60 + c["gap_actual"] * 5, "razon": f"📅 Cada {c['promedio']}d (gap {c['gap_actual']})"})
 
-    # Cada 3 días
     for c in cada_3[:3]:
         candidatos.append({"num": c["num"], "score": 50 + c["gap_actual"] * 5, "razon": f"📅 Cada {c['promedio']}d (gap {c['gap_actual']})"})
 
-    # Cada 4-5 días
     for c in cada_4_5[:3]:
         candidatos.append({"num": c["num"], "score": 40 + c["gap_actual"] * 5, "razon": f"📅 Cada {c['promedio']}d (gap {c['gap_actual']})"})
 
-    # Sin duplicados
     visto = set()
     unicos = []
     for c in sorted(candidatos, key=lambda x: x["score"], reverse=True):
@@ -344,7 +338,7 @@ def armar_resultados(scores, detalles, top_ordenado, atrasos):
 
 def main():
     st.title("👑 Ruleta Royal Pro")
-    st.caption("Patrones · Repetidores · Alternadores · Tripletas")
+    st.caption("Patrones (30 días) · Repetidores · Alternadores · Tripletas")
 
     if st.button("🔄 Recargar datos"):
         st.cache_data.clear()
@@ -367,14 +361,12 @@ def main():
 
     st.caption(f"📅 Último día: {ultimo['fecha']} · Hoy salieron: {len(salieron_hoy)} animalitos")
 
-    # ═══════════════════════════════════════
-    # PATRONES
-    # ═══════════════════════════════════════
-    dias_dict, repetidores, alternadores, cada_2, cada_3, cada_4_5 = analizar_patrones(df, dias_analisis=5)
+    # PATRONES - ANÁLISIS DE 30 DÍAS
+    dias_dict, repetidores, alternadores, cada_2, cada_3, cada_4_5 = analizar_patrones(df, dias_analisis=30)
 
-    st.markdown("## 📊 PATRONES DETECTADOS (últimos 5 días)")
+    st.markdown("## 📊 PATRONES DETECTADOS (análisis de 30 días)")
 
-    # Tripleta de patrones (arriba, es lo más importante)
+    # Tripleta de patrones
     tripleta_pat = armar_tripleta_patrones(repetidores, alternadores, cada_2, cada_3, cada_4_5)
     if len(tripleta_pat) >= 3:
         st.markdown("### 🎯 TRIPLETA DE PATRONES (para mañana)")
@@ -390,7 +382,7 @@ def main():
     if repetidores:
         for i, r in enumerate(repetidores[:8], 1):
             emoji = "🔥" if r["tasa"] >= 50 else ("🟡" if r["tasa"] >= 35 else "🟢")
-            st.write(f"{emoji} **#{i} - {fmt_num(r['num'])} {ANIMALITOS_DICT[r['num']]}** — Repite **{r['tasa']}%** ({r['apariciones']} apariciones)")
+            st.write(f"{emoji} **#{i} - {fmt_num(r['num'])} {ANIMALITOS_DICT[r['num']]}** — Repite **{r['tasa']}%** ({r['apariciones']} apariciones en 30 días)")
     else:
         st.info("Ningún repetidor claro hoy.")
     st.markdown("---")
